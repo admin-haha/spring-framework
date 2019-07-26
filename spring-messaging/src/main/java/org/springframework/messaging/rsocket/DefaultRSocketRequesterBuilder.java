@@ -18,35 +18,62 @@ package org.springframework.messaging.rsocket;
 
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.function.Consumer;
 
 import io.rsocket.RSocketFactory;
+import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.transport.ClientTransport;
 import io.rsocket.transport.netty.client.TcpClientTransport;
 import io.rsocket.transport.netty.client.WebsocketClientTransport;
 import reactor.core.publisher.Mono;
 
+import org.springframework.core.codec.Decoder;
+import org.springframework.core.codec.StringDecoder;
+import org.springframework.core.io.buffer.NettyDataBufferFactory;
 import org.springframework.lang.Nullable;
+import org.springframework.util.Assert;
 import org.springframework.util.MimeType;
 
 /**
  * Default implementation of {@link RSocketRequester.Builder}.
  *
  * @author Brian Clozel
+ * @author Rossen Stoyanchev
  * @since 5.2
  */
 final class DefaultRSocketRequesterBuilder implements RSocketRequester.Builder {
 
 	@Nullable
-	private List<Consumer<RSocketFactory.ClientRSocketFactory>> factoryConfigurers = new ArrayList<>();
+	private MimeType dataMimeType;
+
+	private MimeType metadataMimeType = DefaultRSocketRequester.COMPOSITE_METADATA;
 
 	@Nullable
+	private RSocketStrategies strategies;
+
 	private List<Consumer<RSocketStrategies.Builder>> strategiesConfigurers = new ArrayList<>();
 
+	private List<ClientRSocketFactoryConfigurer> rsocketFactoryConfigurers = new ArrayList<>();
+
+
 	@Override
-	public RSocketRequester.Builder rsocketFactory(Consumer<RSocketFactory.ClientRSocketFactory> configurer) {
-		this.factoryConfigurers.add(configurer);
+	public RSocketRequester.Builder dataMimeType(@Nullable MimeType mimeType) {
+		this.dataMimeType = mimeType;
+		return this;
+	}
+
+	@Override
+	public RSocketRequester.Builder metadataMimeType(MimeType mimeType) {
+		Assert.notNull(mimeType, "`metadataMimeType` is required");
+		this.metadataMimeType = mimeType;
+		return this;
+	}
+
+	@Override
+	public RSocketRequester.Builder rsocketStrategies(@Nullable RSocketStrategies strategies) {
+		this.strategies = strategies;
 		return this;
 	}
 
@@ -57,26 +84,89 @@ final class DefaultRSocketRequesterBuilder implements RSocketRequester.Builder {
 	}
 
 	@Override
-	public Mono<RSocketRequester> connect(ClientTransport transport, MimeType dataMimeType) {
-		return Mono.defer(() -> {
-			RSocketStrategies.Builder strategiesBuilder = RSocketStrategies.builder();
-			this.strategiesConfigurers.forEach(configurer -> configurer.accept(strategiesBuilder));
-			RSocketFactory.ClientRSocketFactory clientFactory = RSocketFactory.connect()
-					.dataMimeType(dataMimeType.toString());
-			this.factoryConfigurers.forEach(configurer -> configurer.accept(clientFactory));
-			return clientFactory.transport(transport).start()
-					.map(rsocket -> RSocketRequester.create(rsocket, dataMimeType, strategiesBuilder.build()));
+	public RSocketRequester.Builder rsocketFactory(ClientRSocketFactoryConfigurer configurer) {
+		this.rsocketFactoryConfigurers.add(configurer);
+		return this;
+	}
+
+	@Override
+	public Mono<RSocketRequester> connectTcp(String host, int port) {
+		return connect(TcpClientTransport.create(host, port));
+	}
+
+	@Override
+	public Mono<RSocketRequester> connectWebSocket(URI uri) {
+		return connect(WebsocketClientTransport.create(uri));
+	}
+
+	@Override
+	public Mono<RSocketRequester> connect(ClientTransport transport) {
+		return Mono.defer(() -> doConnect(transport));
+	}
+
+	private Mono<RSocketRequester> doConnect(ClientTransport transport) {
+		RSocketStrategies rsocketStrategies = getRSocketStrategies();
+		Assert.isTrue(!rsocketStrategies.encoders().isEmpty(), "No encoders");
+		Assert.isTrue(!rsocketStrategies.decoders().isEmpty(), "No decoders");
+
+		RSocketFactory.ClientRSocketFactory rsocketFactory = RSocketFactory.connect();
+		MimeType dataMimeType = getDataMimeType(rsocketStrategies);
+		rsocketFactory.dataMimeType(dataMimeType.toString());
+		rsocketFactory.metadataMimeType(this.metadataMimeType.toString());
+
+		if (rsocketStrategies.dataBufferFactory() instanceof NettyDataBufferFactory) {
+			rsocketFactory.frameDecoder(PayloadDecoder.ZERO_COPY);
+		}
+
+		this.rsocketFactoryConfigurers.forEach(configurer -> {
+			configurer.configureWithStrategies(rsocketStrategies);
+			configurer.configure(rsocketFactory);
 		});
+
+		return rsocketFactory.transport(transport)
+				.start()
+				.map(rsocket -> new DefaultRSocketRequester(
+						rsocket, dataMimeType, this.metadataMimeType, rsocketStrategies));
 	}
 
-	@Override
-	public Mono<RSocketRequester> connectTcp(String host, int port, MimeType dataMimeType) {
-		return connect(TcpClientTransport.create(host, port), dataMimeType);
+	private RSocketStrategies getRSocketStrategies() {
+		if (!this.strategiesConfigurers.isEmpty()) {
+			RSocketStrategies.Builder builder =
+					this.strategies != null ? this.strategies.mutate() : RSocketStrategies.builder();
+			this.strategiesConfigurers.forEach(c -> c.accept(builder));
+			return builder.build();
+		}
+		else {
+			return this.strategies != null ? this.strategies : RSocketStrategies.builder().build();
+		}
 	}
 
-	@Override
-	public Mono<RSocketRequester> connectWebSocket(URI uri, MimeType dataMimeType) {
-		return connect(WebsocketClientTransport.create(uri), dataMimeType);
+	private MimeType getDataMimeType(RSocketStrategies strategies) {
+		if (this.dataMimeType != null) {
+			return this.dataMimeType;
+		}
+		// First non-basic Decoder (e.g. CBOR, Protobuf)
+		for (Decoder<?> candidate : strategies.decoders()) {
+			if (!isCoreCodec(candidate) && !candidate.getDecodableMimeTypes().isEmpty()) {
+				return getMimeType(candidate);
+			}
+		}
+		// First core decoder (e.g. String)
+		for (Decoder<?> decoder : strategies.decoders()) {
+			if (!decoder.getDecodableMimeTypes().isEmpty()) {
+				return getMimeType(decoder);
+			}
+		}
+		throw new IllegalArgumentException("Failed to select data MimeType to use.");
+	}
+
+	private static boolean isCoreCodec(Object codec) {
+		return codec.getClass().getPackage().equals(StringDecoder.class.getPackage());
+	}
+
+	private static MimeType getMimeType(Decoder<?> decoder) {
+		MimeType mimeType = decoder.getDecodableMimeTypes().get(0);
+		return new MimeType(mimeType, Collections.emptyMap());
 	}
 
 }

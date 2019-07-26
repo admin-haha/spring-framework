@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.IdentityHashMap;
 import java.util.Map;
+import java.util.StringJoiner;
 
 import org.springframework.core.SerializableTypeWrapper.FieldTypeProvider;
 import org.springframework.core.SerializableTypeWrapper.MethodParameterTypeProvider;
@@ -880,7 +881,7 @@ public class ResolvableType implements Serializable {
 
 
 	@Override
-	public boolean equals(Object other) {
+	public boolean equals(@Nullable Object other) {
 		if (this == other) {
 			return true;
 		}
@@ -994,7 +995,7 @@ public class ResolvableType implements Serializable {
 	 * {@link Class#isAssignableFrom}, which this serves as a wrapper for.
 	 * For example: {@code ResolvableType.forRawClass(List.class)}.
 	 * @param clazz the class to introspect ({@code null} is semantically
-	 * equivalent to {@code Object.class} for typical use cases here}
+	 * equivalent to {@code Object.class} for typical use cases here)
 	 * @return a {@link ResolvableType} for the specified class
 	 * @since 4.2
 	 * @see #forClass(Class)
@@ -1012,7 +1013,7 @@ public class ResolvableType implements Serializable {
 			}
 			@Override
 			public boolean isAssignableFrom(ResolvableType other) {
-				Class<?> otherClass = other.getRawClass();
+				Class<?> otherClass = other.resolve();
 				return (otherClass != null && (clazz == null || ClassUtils.isAssignable(clazz, otherClass)));
 			}
 		};
@@ -1518,18 +1519,15 @@ public class ResolvableType implements Serializable {
 
 		@Override
 		public String getTypeName() {
-			StringBuilder result = new StringBuilder(this.rawType.getTypeName());
+			String typeName = this.rawType.getTypeName();
 			if (this.typeArguments.length > 0) {
-				result.append('<');
-				for (int i = 0; i < this.typeArguments.length; i++) {
-					if (i > 0) {
-						result.append(", ");
-					}
-					result.append(this.typeArguments[i].getTypeName());
+				StringJoiner stringJoiner = new StringJoiner(", ", "<", ">");
+				for (Type argument : this.typeArguments) {
+					stringJoiner.add(argument.getTypeName());
 				}
-				result.append('>');
+				return typeName + stringJoiner;
 			}
-			return result.toString();
+			return typeName;
 		}
 
 		@Override
@@ -1549,7 +1547,7 @@ public class ResolvableType implements Serializable {
 		}
 
 		@Override
-		public boolean equals(Object other) {
+		public boolean equals(@Nullable Object other) {
 			if (this == other) {
 				return true;
 			}

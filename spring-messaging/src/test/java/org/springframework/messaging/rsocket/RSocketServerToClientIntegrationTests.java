@@ -19,14 +19,12 @@ package org.springframework.messaging.rsocket;
 import java.time.Duration;
 import java.util.Collections;
 
-import io.netty.buffer.PooledByteBufAllocator;
-import io.rsocket.Closeable;
-import io.rsocket.RSocket;
 import io.rsocket.RSocketFactory;
+import io.rsocket.SocketAcceptor;
 import io.rsocket.frame.decoder.PayloadDecoder;
-import io.rsocket.transport.netty.client.TcpClientTransport;
+import io.rsocket.transport.netty.server.CloseableChannel;
 import io.rsocket.transport.netty.server.TcpServerTransport;
-import io.rsocket.util.DefaultPayload;
+import io.rsocket.util.ByteBufPayload;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -40,33 +38,38 @@ import reactor.test.StepVerifier;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.codec.CharSequenceEncoder;
 import org.springframework.core.codec.StringDecoder;
-import org.springframework.core.io.buffer.NettyDataBufferFactory;
 import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.rsocket.annotation.ConnectMapping;
+import org.springframework.messaging.rsocket.annotation.support.RSocketMessageHandler;
 import org.springframework.stereotype.Controller;
+import org.springframework.util.MimeTypeUtils;
 
 /**
  * Client-side handling of requests initiated from the server side.
  *
  *  @author Rossen Stoyanchev
+ * @author Brian Clozel
  */
 public class RSocketServerToClientIntegrationTests {
 
 	private static AnnotationConfigApplicationContext context;
 
-	private static Closeable server;
+	private static CloseableChannel server;
 
 
 	@BeforeClass
 	@SuppressWarnings("ConstantConditions")
 	public static void setupOnce() {
+
 		context = new AnnotationConfigApplicationContext(RSocketConfig.class);
+		RSocketMessageHandler messageHandler = context.getBean(RSocketMessageHandler.class);
+		SocketAcceptor responder = messageHandler.serverResponder();
 
 		server = RSocketFactory.receive()
 				.frameDecoder(PayloadDecoder.ZERO_COPY)
-				.acceptor(context.getBean("serverAcceptor", MessageHandlerAcceptor.class))
-				.transport(TcpServerTransport.create("localhost", 7000))
+				.acceptor(responder)
+				.transport(TcpServerTransport.create("localhost", 0))
 				.start()
 				.block();
 	}
@@ -79,46 +82,47 @@ public class RSocketServerToClientIntegrationTests {
 
 	@Test
 	public void echo() {
-		connectAndVerify("connect.echo");
+		connectAndRunTest("echo");
 	}
 
 	@Test
 	public void echoAsync() {
-		connectAndVerify("connect.echo-async");
+		connectAndRunTest("echo-async");
 	}
 
 	@Test
 	public void echoStream() {
-		connectAndVerify("connect.echo-stream");
+		connectAndRunTest("echo-stream");
 	}
 
 	@Test
 	public void echoChannel() {
-		connectAndVerify("connect.echo-channel");
+		connectAndRunTest("echo-channel");
 	}
 
 
-	private static void connectAndVerify(String destination) {
+	private static void connectAndRunTest(String connectionRoute) {
 
 		ServerController serverController = context.getBean(ServerController.class);
 		serverController.reset();
 
-		RSocket rsocket = null;
+		RSocketRequester requester = null;
 		try {
-			rsocket = RSocketFactory.connect()
-					.setupPayload(DefaultPayload.create("", destination))
-					.dataMimeType("text/plain")
-					.frameDecoder(PayloadDecoder.ZERO_COPY)
-					.acceptor(context.getBean("clientAcceptor", MessageHandlerAcceptor.class))
-					.transport(TcpClientTransport.create("localhost", 7000))
-					.start()
+			requester = RSocketRequester.builder()
+					.rsocketFactory(factory -> {
+						factory.metadataMimeType("text/plain");
+						factory.setupPayload(ByteBufPayload.create("", connectionRoute));
+					})
+					.rsocketFactory(RSocketMessageHandler.clientResponder(new ClientHandler()))
+					.rsocketStrategies(context.getBean(RSocketStrategies.class))
+					.connectTcp("localhost", server.address().getPort())
 					.block();
 
 			serverController.await(Duration.ofSeconds(5));
 		}
 		finally {
-			if (rsocket != null) {
-				rsocket.dispose();
+			if (requester != null) {
+				requester.rsocket().dispose();
 			}
 		}
 	}
@@ -141,7 +145,7 @@ public class RSocketServerToClientIntegrationTests {
 		}
 
 
-		@MessageMapping("connect.echo")
+		@ConnectMapping("echo")
 		void echo(RSocketRequester requester) {
 			runTest(() -> {
 				Flux<String> flux = Flux.range(1, 3).concatMap(i ->
@@ -156,7 +160,7 @@ public class RSocketServerToClientIntegrationTests {
 			});
 		}
 
-		@MessageMapping("connect.echo-async")
+		@ConnectMapping("echo-async")
 		void echoAsync(RSocketRequester requester) {
 			runTest(() -> {
 				Flux<String> flux = Flux.range(1, 3).concatMap(i ->
@@ -171,7 +175,7 @@ public class RSocketServerToClientIntegrationTests {
 			});
 		}
 
-		@MessageMapping("connect.echo-stream")
+		@ConnectMapping("echo-stream")
 		void echoStream(RSocketRequester requester) {
 			runTest(() -> {
 				Flux<String> flux = requester.route("echo-stream").data("Hello").retrieveFlux(String.class);
@@ -186,7 +190,7 @@ public class RSocketServerToClientIntegrationTests {
 			});
 		}
 
-		@MessageMapping("connect.echo-channel")
+		@ConnectMapping("echo-channel")
 		void echoChannel(RSocketRequester requester) {
 			runTest(() -> {
 				Flux<String> flux = requester.route("echo-channel")
@@ -198,8 +202,7 @@ public class RSocketServerToClientIntegrationTests {
 						.expectNextCount(7)
 						.expectNext("Hello 9 async")
 						.expectNext("Hello 10 async")
-						.thenCancel()  // https://github.com/rsocket/rsocket-java/issues/613
-						.verify(Duration.ofSeconds(5));
+						.verifyComplete();
 			});
 		}
 
@@ -249,38 +252,23 @@ public class RSocketServerToClientIntegrationTests {
 	static class RSocketConfig {
 
 		@Bean
-		public ClientHandler clientHandler() {
-			return new ClientHandler();
-		}
-
-		@Bean
 		public ServerController serverController() {
 			return new ServerController();
 		}
 
 		@Bean
-		public MessageHandlerAcceptor clientAcceptor() {
-			MessageHandlerAcceptor acceptor = new MessageHandlerAcceptor();
-			acceptor.setHandlers(Collections.singletonList(clientHandler()));
-			acceptor.setAutoDetectDisabled();
-			acceptor.setRSocketStrategies(rsocketStrategies());
-			return acceptor;
-		}
-
-		@Bean
-		public MessageHandlerAcceptor serverAcceptor() {
-			MessageHandlerAcceptor handler = new MessageHandlerAcceptor();
+		public RSocketMessageHandler serverMessageHandler() {
+			RSocketMessageHandler handler = new RSocketMessageHandler();
 			handler.setRSocketStrategies(rsocketStrategies());
 			return handler;
 		}
 
 		@Bean
 		public RSocketStrategies rsocketStrategies() {
-			return RSocketStrategies.builder()
-					.decoder(StringDecoder.allMimeTypes())
-					.encoder(CharSequenceEncoder.allMimeTypes())
-					.dataBufferFactory(new NettyDataBufferFactory(PooledByteBufAllocator.DEFAULT))
-					.build();
+			DefaultMetadataExtractor extractor = new DefaultMetadataExtractor();
+			extractor.setDecoders(Collections.singletonList(StringDecoder.allMimeTypes()));
+			extractor.metadataToExtract(MimeTypeUtils.TEXT_PLAIN, String.class, MetadataExtractor.ROUTE_KEY);
+			return RSocketStrategies.builder().metadataExtractor(extractor).build();
 		}
 	}
 
