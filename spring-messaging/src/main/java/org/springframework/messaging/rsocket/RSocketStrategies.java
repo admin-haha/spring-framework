@@ -98,9 +98,10 @@ public interface RSocketStrategies {
 	RouteMatcher routeMatcher();
 
 	/**
-	 * Return the configured {@link Builder#metadataExtractor(MetadataExtractor)}.
+	 * Return the configured
+	 * {@link Builder#reactiveAdapterStrategy(ReactiveAdapterRegistry) reactiveAdapterRegistry}.
 	 */
-	MetadataExtractor metadataExtractor();
+	ReactiveAdapterRegistry reactiveAdapterRegistry();
 
 	/**
 	 * Return the configured
@@ -109,10 +110,9 @@ public interface RSocketStrategies {
 	DataBufferFactory dataBufferFactory();
 
 	/**
-	 * Return the configured
-	 * {@link Builder#reactiveAdapterStrategy(ReactiveAdapterRegistry) reactiveAdapterRegistry}.
+	 * Return the configured {@link Builder#metadataExtractor(MetadataExtractor)}.
 	 */
-	ReactiveAdapterRegistry reactiveAdapterRegistry();
+	MetadataExtractor metadataExtractor();
 
 	/**
 	 * Return a builder to create a new {@link RSocketStrategies} instance
@@ -133,7 +133,7 @@ public interface RSocketStrategies {
 	}
 
 	/**
-	 * Return a builder to build a new {@code RSocketStrategies} instance.
+	 * Return a builder to prepare a new {@code RSocketStrategies} instance.
 	 * The builder applies default settings, see individual builder methods for
 	 * details.
 	 */
@@ -179,20 +179,10 @@ public interface RSocketStrategies {
 		 * client or server responders.
 		 * <p>By default, {@link SimpleRouteMatcher} is used, backed by
 		 * {@link AntPathMatcher} with "." as separator. For better
-		 * efficiency consider using the {@code PathPatternRouteMatcher} from
+		 * efficiency consider switching to {@code PathPatternRouteMatcher} from
 		 * {@code spring-web} instead.
 		 */
 		Builder routeMatcher(@Nullable RouteMatcher routeMatcher);
-
-		/**
-		 * Configure a {@link MetadataExtractor} to extract the route along with
-		 * other metadata. This option is applicable to client or server
-		 * responders.
-		 * <p>By default this is {@link DefaultMetadataExtractor} extracting a
-		 * route from {@code "message/x.rsocket.routing.v0"} or
-		 * {@code "text/plain"} metadata entries.
-		 */
-		Builder metadataExtractor(@Nullable MetadataExtractor metadataExtractor);
 
 		/**
 		 * Configure the registry for reactive type support. This can be used to
@@ -213,11 +203,27 @@ public interface RSocketStrategies {
 		 * here, and sets the frame decoder in {@link ClientRSocketFactory
 		 * ClientRSocketFactory} accordingly. For server setup, the
 		 * {@link ServerRSocketFactory ServerRSocketFactory} must be configured
-		 * accordingly too for zero copy.
+		 * accordingly for zero copy too.
 		 * <p>If using {@link DefaultDataBufferFactory} instead, there is no
 		 * need for related config changes in RSocket.
 		 */
 		Builder dataBufferFactory(@Nullable DataBufferFactory bufferFactory);
+
+		/**
+		 * Configure a {@link MetadataExtractor} to extract the route along with
+		 * other metadata. This option is applicable to client or server
+		 * responders.
+		 * <p>By default this is {@link DefaultMetadataExtractor} created with
+		 * the {@link #decoder(Decoder[]) configured} decoders and extracting a
+		 * route from {@code "message/x.rsocket.routing.v0"} metadata.
+		 */
+		Builder metadataExtractor(@Nullable MetadataExtractor metadataExtractor);
+
+		/**
+		 * Apply the consumer to the {@link MetadataExtractorRegistry} in order
+		 * to register extra metadata entry extractors.
+		 */
+		Builder metadataExtractorRegistry(Consumer<MetadataExtractorRegistry> consumer);
 
 		/**
 		 * Build the {@code RSocketStrategies} instance.

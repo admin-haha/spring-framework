@@ -17,17 +17,15 @@
 package org.springframework.messaging.rsocket;
 
 import java.time.Duration;
-import java.util.Collections;
 
 import io.rsocket.RSocketFactory;
 import io.rsocket.SocketAcceptor;
 import io.rsocket.frame.decoder.PayloadDecoder;
 import io.rsocket.transport.netty.server.CloseableChannel;
 import io.rsocket.transport.netty.server.TcpServerTransport;
-import io.rsocket.util.ByteBufPayload;
-import org.junit.AfterClass;
-import org.junit.BeforeClass;
-import org.junit.Test;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.MonoProcessor;
@@ -38,12 +36,10 @@ import reactor.test.StepVerifier;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.codec.StringDecoder;
 import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.rsocket.annotation.ConnectMapping;
 import org.springframework.messaging.rsocket.annotation.support.RSocketMessageHandler;
 import org.springframework.stereotype.Controller;
-import org.springframework.util.MimeTypeUtils;
 
 /**
  * Client-side handling of requests initiated from the server side.
@@ -58,13 +54,13 @@ public class RSocketServerToClientIntegrationTests {
 	private static CloseableChannel server;
 
 
-	@BeforeClass
+	@BeforeAll
 	@SuppressWarnings("ConstantConditions")
 	public static void setupOnce() {
 
 		context = new AnnotationConfigApplicationContext(RSocketConfig.class);
 		RSocketMessageHandler messageHandler = context.getBean(RSocketMessageHandler.class);
-		SocketAcceptor responder = messageHandler.serverResponder();
+		SocketAcceptor responder = messageHandler.responder();
 
 		server = RSocketFactory.receive()
 				.frameDecoder(PayloadDecoder.ZERO_COPY)
@@ -74,7 +70,7 @@ public class RSocketServerToClientIntegrationTests {
 				.block();
 	}
 
-	@AfterClass
+	@AfterAll
 	public static void tearDownOnce() {
 		server.dispose();
 	}
@@ -106,15 +102,16 @@ public class RSocketServerToClientIntegrationTests {
 		ServerController serverController = context.getBean(ServerController.class);
 		serverController.reset();
 
+		RSocketStrategies strategies = context.getBean(RSocketStrategies.class);
+		ClientRSocketFactoryConfigurer clientResponderConfigurer =
+				RSocketMessageHandler.clientResponder(strategies, new ClientHandler());
+
 		RSocketRequester requester = null;
 		try {
 			requester = RSocketRequester.builder()
-					.rsocketFactory(factory -> {
-						factory.metadataMimeType("text/plain");
-						factory.setupPayload(ByteBufPayload.create("", connectionRoute));
-					})
-					.rsocketFactory(RSocketMessageHandler.clientResponder(new ClientHandler()))
-					.rsocketStrategies(context.getBean(RSocketStrategies.class))
+					.setupRoute(connectionRoute)
+					.rsocketStrategies(strategies)
+					.rsocketFactory(clientResponderConfigurer)
 					.connectTcp("localhost", server.address().getPort())
 					.block();
 
@@ -265,10 +262,7 @@ public class RSocketServerToClientIntegrationTests {
 
 		@Bean
 		public RSocketStrategies rsocketStrategies() {
-			DefaultMetadataExtractor extractor = new DefaultMetadataExtractor();
-			extractor.setDecoders(Collections.singletonList(StringDecoder.allMimeTypes()));
-			extractor.metadataToExtract(MimeTypeUtils.TEXT_PLAIN, String.class, MetadataExtractor.ROUTE_KEY);
-			return RSocketStrategies.builder().metadataExtractor(extractor).build();
+			return RSocketStrategies.create();
 		}
 	}
 
